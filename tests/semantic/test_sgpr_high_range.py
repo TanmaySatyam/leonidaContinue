@@ -122,6 +122,25 @@ class SgprHighRangeTest(unittest.TestCase):
                 self.assertIn("%vcc_hi", spvasm)
                 _assemble_and_validate(spvasm)
 
+    def test_s_load_with_vcc_64bit_base_pointer_translates(self):
+        # 79 library compute shaders pass `vcc` (s[106:107]) as the 64-bit base pointer of s_load_dwordx4/x8.
+        spvasm = _translate_cs([
+            "\ts_mov_b32 vcc_lo, s0",
+            "\ts_mov_b32 vcc_hi, s1",
+            "\ts_load_dwordx4 s[12:15], vcc, 0x0",
+            "\ts_load_dwordx8 s[16:23], vcc, 0x20",
+            "\ts_load_dwordx4 [s104,s105,vcc_lo,vcc_hi], vcc, 0x40",
+            "\ts_waitcnt lgkmcnt(0)",
+            "\tv_mov_b32_e32 v1, s12",
+            "\tv_add_nc_u32_e32 v1, s16, v1",
+            "\tv_add_nc_u32_e32 v1, vcc_lo, v1",
+            "\tbuffer_store_dword v1, v0, s[4:7], 0 offen",
+            "\ts_endpgm",
+        ])
+        self.assertIn("%vcc", spvasm)
+        self.assertIn("%vcc_hi", spvasm)
+        _assemble_and_validate(spvasm)
+
     def test_mimg_high_sgpr_rsrc_and_sampler_translate(self):
         for r8, samp4 in (
             ("s[100:107]", "s[104:107]"),
