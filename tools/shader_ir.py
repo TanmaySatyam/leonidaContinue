@@ -111,6 +111,11 @@ def operand(tok):
         m = _REG_RANGE.fullmatch(core)
         if m:
             lo, hi = int(m.group(2)), int(m.group(3))
+            if m.group(1) == "s" and lo <= 105 < hi <= 107 and not neg and not absm:
+                # Hardware SGPR ranges spanning past s105 into vcc_lo (106) / vcc_hi (107) alias VCC, matching
+                # LLVM VCCTuple syntax `[s...,vcc_lo,vcc_hi]`.
+                items = [r if r <= 105 else ("vcc_lo" if r == 106 else "vcc_hi") for r in range(lo, hi + 1)]
+                return {"k": "slist", "r": items, "n": len(items)}
             return {"k": m.group(1) + "gpr", "r": lo, "n": hi - lo + 1, "neg": neg, "abs": absm}
         m = _VLIST.fullmatch(core)
         if m:  # NSA image address: non-contiguous VGPR list

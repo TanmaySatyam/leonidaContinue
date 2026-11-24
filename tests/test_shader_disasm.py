@@ -486,5 +486,74 @@ class DisasmOutputCollisionTest(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(self.dir, "foo.s")))
 
 
+class SgprVccTupleFallbackTest(unittest.TestCase):
+    """Verify the llvm-mc SGPR>105 VCCTuple fallback and byte-offset resync."""
+
+    @classmethod
+    def setUpClass(cls):
+        tools_dir = os.path.join(ROOT, "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import shader_disasm as sd
+        cls.sd = sd
+
+    def test_patches_detect_smem_mimg_and_mubuf_vcc_tuples(self):
+        import struct
+        # 1) SMEM s_load_dwordx8 s[100:107], s[20:21], 0x40 (op=0x03, sdata=100, sbase=20)
+        smem_w0 = (0x3D << 26) | (0x03 << 18) | (100 << 6) | (20 // 2)
+        smem_w1 = 0xFA000040
+        # 2) MIMG image_sample_lz with srsrc=100 (8-dword) and ssamp=88
+        mimg_sample_w0 = (0x3C << 26) | (0x27 << 18) | (0x7 << 8) | (0x1 << 3)
+        mimg_sample_w1 = ((88 // 4) << 21) | ((100 // 4) << 16) | (4 << 8) | 2
+        # 3) MIMG image_gather4_lz with srsrc=96 and ssamp=104 (op=0x47)
+        mimg_gather_w0 = (0x3C << 26) | (0x47 << 18) | (0x1 << 8) | (0x1 << 3)
+        mimg_gather_w1 = ((104 // 4) << 21) | ((96 // 4) << 16) | (8 << 8) | 2
+        # 4) MUBUF buffer_load_dword with srsrc=104
+        mubuf_w0 = (0x38 << 26) | (0x14 << 18)
+        mubuf_w1 = ((104 // 4) << 16) | (1 << 8) | 0
+        # 5) MIMG image_load (op=0x00, NO sampler) with junk ssamp bits = 26 (104) and srsrc=8 -> must NOT patch
+        mimg_load_w0 = (0x3C << 26) | (0x00 << 18) | (0xF << 8) | (0x1 << 3)
+        mimg_load_w1 = ((104 // 4) << 21) | ((8 // 4) << 16) | (4 << 8) | 2
+
+        code = struct.pack(
+            "<10I",
+            smem_w0, smem_w1,
+            mimg_sample_w0, mimg_sample_w1,
+            mimg_gather_w0, mimg_gather_w1,
+            mubuf_w0, mubuf_w1,
+            mimg_load_w0, mimg_load_w1,
+        )
+        patches = self.sd._sgpr_vcc_patches(code, {0, 8, 16, 24, 32})
+        self.assertEqual(sorted(patches.keys()), [0, 8, 16, 24])
+        self.assertEqual(patches[0][4], [("s[0:7]", "[s100,s101,s102,s103,s104,s105,vcc_lo,vcc_hi]")])
+        self.assertEqual(patches[8][4], [("s[0:7]", "[s100,s101,s102,s103,s104,s105,vcc_lo,vcc_hi]")])
+        self.assertEqual(patches[16][4], [("s[0:3]", "[s104,s105,vcc_lo,vcc_hi]")])
+        self.assertEqual(patches[24][4], [("s[0:3]", "[s104,s105,vcc_lo,vcc_hi]")])
+
+    def test_rewrite_restores_vcc_tuple_and_resyncs_after_omitted_literal(self):
+        import struct
+        # Simulate an 8-byte VOP3P encoding + 4-byte omitted literal before a patched SMEM instruction at offset 12.
+        vop3p = struct.pack("<2I", 0xCC20008B, 0x9200D080)
+        lit = struct.pack("<I", 0x42200000)
+        orig_w0 = (0x3D << 26) | (0x0A << 18) | (104 << 6) | (16 // 2)
+        orig_w1 = 0xFA000020
+        code = vop3p + lit + struct.pack("<2I", orig_w0, orig_w1)
+        patches = self.sd._sgpr_vcc_patches(code, {12})
+        self.assertIn(12, patches)
+        patched = bytearray(code)
+        _, _, pw0, pw1, _ = patches[12]
+        struct.pack_into("<2I", patched, 12, pw0, pw1)
+        pw_hex = ",".join(f"0x{b:02x}" for b in struct.pack("<2I", pw0, pw1))
+        asm_in = (
+            "\tv_fma_mix_f32 v139, 0, s104, neg(0) ; encoding: [0x8b,0x00,0x20,0xcc,0x80,0xd0,0x00,0x92]\n"
+            f"\ts_buffer_load_dwordx4 s[0:3], s[16:19], 0x20 ; encoding: [{pw_hex}]\n"
+        )
+        rewritten, hit = self.sd._rewrite_patched_asm(asm_in, bytes(patched), set(), patches)
+        self.assertEqual(hit, {12})
+        self.assertIn("[s104,s105,vcc_lo,vcc_hi]", rewritten)
+        orig_hex = ",".join(f"0x{b:02x}" for b in struct.pack("<2I", orig_w0, orig_w1))
+        self.assertIn(f"; encoding: [{orig_hex}]", rewritten)
+
+
 if __name__ == "__main__":
     unittest.main()
